@@ -1,0 +1,64 @@
+#!/usr/bin/env zsh
+# Manage the agent-hub launchd agent (starts at login, restarts if it dies).
+# While the hub runs, `caffeinate -s -w <hub pid>` keeps the Mac from sleeping on AC power (brief
+# dark wakes were cutting its network calls); node stays launchd's main process, so restarts and
+# its graceful shutdown work as before, and caffeinate exits with it.
+# Usage: agent-hub-service install|uninstall|restart|status|logs
+set -euo pipefail
+
+label="org.aidan.agent-hub"
+hub_root="${AGENT_HUB_ROOT_DIR:-$HOME/Documents/misc/agent-hub}"
+plist="$HOME/Library/LaunchAgents/$label.plist"
+log="$HOME/Library/Logs/agent-hub.log"
+domain="gui/$(id -u)"
+
+write_plist() {
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>-c</string>
+    <string>npm run prestart --silent &amp;&amp; { /usr/bin/caffeinate -s -w \$\$ &amp; } &amp;&amp; exec node src/main.mjs</string>
+  </array>
+  <key>WorkingDirectory</key><string>$hub_root</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>$HOME</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+</dict>
+</plist>
+EOF
+}
+
+case "${1:-status}" in
+  install)
+    [[ -d "$hub_root" ]] || { echo "agent-hub not found at $hub_root" >&2; exit 1; }
+    launchctl bootout "$domain/$label" 2>/dev/null || true
+    write_plist
+    launchctl bootstrap "$domain" "$plist"
+    echo "Installed $label; UI at http://127.0.0.1:8463, logs in $log" ;;
+  uninstall)
+    launchctl bootout "$domain/$label" 2>/dev/null || true
+    rm -f "$plist"
+    echo "Removed $label" ;;
+  restart)
+    launchctl kickstart -k "$domain/$label" ;;
+  status)
+    launchctl print "$domain/$label" 2>/dev/null | grep -E "state =|pid =|last exit" || echo "$label not loaded" ;;
+  logs)
+    tail -n 100 -f "$log" ;;
+  *)
+    echo "Usage: agent-hub-service install|uninstall|restart|status|logs" >&2; exit 1 ;;
+esac
